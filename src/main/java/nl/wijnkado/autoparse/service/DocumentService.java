@@ -23,7 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDate;
-import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 @Service
@@ -38,9 +38,11 @@ public class DocumentService {
     }
 
     public Path generateOrdersDocument() throws IOException {
-        List<OrderDto> orders = orderService.getProcessingOrdersWithoutTrackTrace();
-
-        Collections.reverse(orders);
+        // 1) Haal orders op en sorteer: oudste ID eerst
+        List<OrderDto> orders = orderService.getProcessingOrdersWithoutTrackTrace()
+                .stream()
+                .sorted(Comparator.comparingLong(OrderDto::getId))
+                .toList();
 
         if (orders.isEmpty()) {
             throw new IllegalStateException("Geen orders zonder track & trace gevonden.");
@@ -57,7 +59,7 @@ public class DocumentService {
             // --- 2) Customer note gecentreerd + HTML entities unescapen + echte enters ---
             String rawNote = order.getCustomerNote() != null ? order.getCustomerNote() : "";
 
-            // HTML entities (&amp;, &eacute;, &quot;, etc.) decoderen
+            // &amp; -> &, &eacute; -> é, etc.
             String note = StringEscapeUtils.unescapeHtml4(rawNote);
             // non-breaking spaces naar normale spaties
             note = note.replace('\u00A0', ' ').trim();
@@ -67,7 +69,7 @@ public class DocumentService {
             XWPFRun noteRun = noteParagraph.createRun();
             noteRun.setBold(true);
 
-            // elke regel apart in Word met echte breaks
+            // elke regel apart met echte Word-‘enters’
             String[] noteLines = note.split("\\r?\\n");
             for (int li = 0; li < noteLines.length; li++) {
                 if (li > 0) {
@@ -91,7 +93,14 @@ public class DocumentService {
 
             if (order.getLineItems() != null && !order.getLineItems().isEmpty()) {
                 LineItem item = order.getLineItems().get(0);
-                productTitle = item.getName() != null ? item.getName() : "";
+
+                if (item.getName() != null) {
+                    // HTML entities (&amp;, &nbsp;, &eacute;) netjes omzetten
+                    productTitle = StringEscapeUtils.unescapeHtml4(item.getName())
+                            .replace('\u00A0', ' ')  // NBSP → normale spatie
+                            .trim();
+                }
+
                 productId = item.getProductId();
             }
 
@@ -135,7 +144,7 @@ public class DocumentService {
             }
         }
 
-        // Output pad, bv. ./output/orders_2025-11-25.docx
+        // Output pad, bv. ./output/orders_2025-12-09.docx
         Path outputDir = Paths.get("output");
         Files.createDirectories(outputDir);
         Path outputFile = outputDir.resolve("orders_" + LocalDate.now() + ".docx");
@@ -167,35 +176,34 @@ public class DocumentService {
         CTPBdr borders = pr.isSetPBdr() ? pr.getPBdr() : pr.addNewPBdr();
 
         CTBorder bottom = borders.isSetBottom() ? borders.getBottom() : borders.addNewBottom();
-        bottom.setVal(STBorder.SINGLE);              // normale lijn
-        bottom.setSz(BigInteger.valueOf(8));         // lijndikte
-        bottom.setSpace(BigInteger.ZERO);            // geen extra ruimte
-        bottom.setColor("000000");                   // zwart
+        bottom.setVal(STBorder.SINGLE);
+        bottom.setSz(BigInteger.valueOf(8));
+        bottom.setSpace(BigInteger.ZERO);
+        bottom.setColor("000000");
     }
 
     /**
      * HTML-stripper + entity decode (&nbsp;, &amp;, &eacute; etc.).
      */
-private String cleanHtml(String html) {
-    if (html == null) {
-        return "";
+    private String cleanHtml(String html) {
+        if (html == null) {
+            return "";
+        }
+
+        // 1) HTML line breaks → \n
+        String text = html
+                .replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("(?i)</p>", "\n");
+
+        // 2) overige tags weg
+        text = text.replaceAll("<[^>]+>", "");
+
+        // 3) HTML entities (&amp;, &nbsp;, &eacute;, &quot;)
+        text = StringEscapeUtils.unescapeHtml4(text);
+
+        // 4) non-breaking spaces (NBSP) → gewone spaties
+        text = text.replace('\u00A0', ' ');
+
+        return text.trim();
     }
-
-    // 1) Zet HTML line breaks om naar \n
-    String text = html
-            .replaceAll("(?i)<br\\s*/?>", "\n")
-            .replaceAll("(?i)</p>", "\n");
-
-    // 2) Strip overige HTML
-    text = text.replaceAll("<[^>]+>", "");
-
-    // 3) Decodeer HTML entities (zoals &amp; &eacute; &quot;)
-    text = StringEscapeUtils.unescapeHtml4(text);
-
-    // 4) Non-breaking spaces naar normale spaties
-    text = text.replace('\u00A0', ' ');
-
-    return text.trim();
-}
-
 }
