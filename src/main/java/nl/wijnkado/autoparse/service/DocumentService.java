@@ -124,6 +124,7 @@ public class DocumentService {
                 descParagraph.setAlignment(ParagraphAlignment.CENTER);
                 XWPFRun descRun = descParagraph.createRun();
                 descRun.setText(productDescription);
+                descRun.setFontSize(11);
             }
 
             // --- 8) Witregel onder de beschrijving ---
