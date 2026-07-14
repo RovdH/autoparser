@@ -1,7 +1,12 @@
 package nl.wijnkado.autoparse.service;
 
 import nl.wijnkado.autoparse.dto.OrderDto;
+import nl.wijnkado.autoparse.dto.OrderCompletionResult;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
@@ -11,6 +16,13 @@ import java.util.List;
 import org.springframework.web.util.UriComponentsBuilder;
 import java.net.URI;
 import java.util.ArrayList;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.Optional;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.Map;
 
 
 @Service
@@ -27,6 +39,19 @@ public class OrderService {
     @Value("${woocommerce.consumer-secret}")
     private String consumerSecret;
 
+    /**
+     * De order-meta key waarin de actieve bezorgplugin de bezorgdatum opslaat.
+     * Overschrijf deze waarde in application.yml als de plugin een andere key gebruikt.
+     */
+    @Value("${woocommerce.delivery-date-meta-key:_wkdo_delivery_date}")
+    private String deliveryDateMetaKey;
+
+    private static final List<DateTimeFormatter> DELIVERY_DATE_FORMATS = List.of(
+            DateTimeFormatter.ISO_LOCAL_DATE,
+            DateTimeFormatter.ofPattern("d-M-uuuu"),
+            DateTimeFormatter.ofPattern("d/M/uuuu")
+    );
+
     public OrderService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
@@ -40,7 +65,7 @@ public class OrderService {
     }
 
     int page = 1;
-    int pageSize = 100; 
+    int pageSize = 100;
     List<OrderDto> allOrders = new ArrayList<>();
 
     try {
@@ -88,80 +113,126 @@ public class OrderService {
 
 
     /**
-     * Filter de orders waar nog GEEN track & trace op zit.
-     * We kijken naar meta_data key '_myparcel_shipments'.
+     * Processing orders met een bezorgdatum binnen de inclusieve range.
      */
-public List<OrderDto> getProcessingOrdersWithoutTrackTrace() {
-    List<OrderDto> allProcessing = getProcessingOrders(); // jouw bestaande call
+    public List<OrderDto> getProcessingOrdersByDeliveryDate(LocalDate from, LocalDate to) {
+        if (from == null || to == null) {
+            throw new IllegalArgumentException("Bezorgdatum van en tot zijn verplicht.");
+        }
+        if (from.isAfter(to)) {
+            throw new IllegalArgumentException("De begindatum mag niet na de einddatum liggen.");
+        }
 
-    return allProcessing.stream()
-            // status moet 'processing' zijn
-            .filter(o -> "processing".equalsIgnoreCase(o.getStatus()))
-            // en géén echte track & trace
-            .filter(this::hasNoRealTrackTrace)
-            .toList();
-}
-
-private boolean hasNoRealTrackTrace(OrderDto order) {
-    if (order.getMetaData() == null) {
-        // geen metadata = sowieso geen T&T
-        return true;
+        return getProcessingOrders().stream()
+                .filter(order -> "processing".equalsIgnoreCase(order.getStatus()))
+                .filter(order -> getDeliveryDate(order)
+                        .map(date -> !date.isBefore(from) && !date.isAfter(to))
+                        .orElse(false))
+                .toList();
     }
 
-    // Zoek alle _myparcel_shipments entries
-    return order.getMetaData().stream()
-            .filter(m -> "_myparcel_shipments".equals(m.getKey()))
-            .map(m -> String.valueOf(m.getValue()))  // value is JSON-string
-            // als er ergens een shipment is met een niet-lege barcode => dan heeft order T&T
-            .noneMatch(this::shipmentHasRealBarcode);
-}
+    public Optional<LocalDate> getDeliveryDate(OrderDto order) {
+        if (order == null || order.getMetaData() == null) {
+            return Optional.empty();
+        }
 
-/**
- * Checkt op basis van de ruwe JSON-string of er een niet-lege barcode in zit.
- * Voorbeelden:
- *  - "{\"...\"barcode\":\"3SXDXU030710702\"...}"  -> true  (heeft T&T)
- *  - "{\"...\"barcode\":\"\"...}"                -> false (nog geen T&T)
- *  - geen "barcode" key                           -> false (nog geen T&T)
- */
-private boolean shipmentHasRealBarcode(String shipmentJson) {
-    if (shipmentJson == null || shipmentJson.isBlank()) {
-        return false;
+        Set<String> acceptedKeys = new HashSet<>(Set.of(
+                "delivery_date",
+                "_delivery_date",
+                "_wkdo_delivery_date",
+                "_wkdo_delivery_date_display",
+                "bezorgdatum"
+        ));
+        acceptedKeys.add(deliveryDateMetaKey.trim().toLowerCase());
+
+        return order.getMetaData().stream()
+                .filter(meta -> meta.getKey() != null
+                        && acceptedKeys.contains(meta.getKey().trim().toLowerCase()))
+                .map(OrderDto.MetaData::getValue)
+                .filter(value -> value != null)
+                .map(Object::toString)
+                .map(this::parseDeliveryDate)
+                .flatMap(Optional::stream)
+                .findFirst();
     }
 
-    String marker = "\"barcode\":\"";
-    int idx = shipmentJson.indexOf(marker);
-    if (idx == -1) {
-        // helemaal geen barcode veld
-        return false;
+    /**
+     * Zet alle nog processing orders voor één bezorgdatum op completed.
+     * Fouten worden per order teruggegeven, zodat een gedeeltelijk resultaat zichtbaar blijft.
+     */
+    public OrderCompletionResult completeProcessingOrdersByDeliveryDate(LocalDate deliveryDate) {
+        if (deliveryDate == null) {
+            throw new IllegalArgumentException("Bezorgdatum is verplicht.");
+        }
+
+        List<OrderDto> orders = getProcessingOrdersByDeliveryDate(deliveryDate, deliveryDate);
+        List<Long> completedOrderIds = new ArrayList<>();
+        List<OrderCompletionResult.OrderFailure> failures = new ArrayList<>();
+
+        for (OrderDto order : orders) {
+            if (order.getId() == null) {
+                failures.add(new OrderCompletionResult.OrderFailure(null,
+                        "Order zonder geldig ordernummer overgeslagen."));
+                continue;
+            }
+
+            try {
+                markOrderCompleted(order.getId());
+                completedOrderIds.add(order.getId());
+            } catch (HttpStatusCodeException e) {
+                failures.add(new OrderCompletionResult.OrderFailure(order.getId(),
+                        "WooCommerce gaf " + e.getStatusCode() + " terug."));
+            } catch (Exception e) {
+                failures.add(new OrderCompletionResult.OrderFailure(order.getId(),
+                        "Status kon niet worden bijgewerkt: " + e.getMessage()));
+            }
+        }
+
+        return new OrderCompletionResult(
+                deliveryDate,
+                orders.size(),
+                completedOrderIds.size(),
+                List.copyOf(completedOrderIds),
+                List.copyOf(failures)
+        );
     }
 
-    int start = idx + marker.length();
-    int end = shipmentJson.indexOf("\"", start);
-    if (end == -1) {
-        // kapotte / incomplete JSON? doe maar alsof geen T&T
-        return false;
+    private void markOrderCompleted(Long orderId) {
+        URI uri = UriComponentsBuilder
+                .fromUriString(baseUrl + "/orders/" + orderId)
+                .queryParam("consumer_key", consumerKey)
+                .queryParam("consumer_secret", consumerSecret)
+                .build(true)
+                .toUri();
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, String>> request = new HttpEntity<>(
+                Map.of("status", "completed"), headers);
+
+        restTemplate.exchange(uri, HttpMethod.PUT, request, Void.class);
     }
 
-    String code = shipmentJson.substring(start, end).trim();
-    return !code.isEmpty();
-}
+    private Optional<LocalDate> parseDeliveryDate(String rawValue) {
+        if (rawValue == null || rawValue.isBlank()) {
+            return Optional.empty();
+        }
 
+        String value = rawValue.trim();
+        // Ook waarden als 2026-07-15T10:00:00 en "2026-07-15" accepteren.
+        if (value.length() >= 10 && value.charAt(4) == '-' && value.charAt(7) == '-') {
+            value = value.substring(0, 10);
+        }
+        value = value.replace("\"", "").trim();
 
-// private boolean hasTrackAndTrace(OrderDto order) {
-//     if (order.getMetaData() == null) {
-//         return false;
-//     }
-
-//     // We zoeken expliciet naar ECHTE T&T gegevens
-//     return order.getMetaData().stream()
-//             .filter(md -> "_myparcel_shipments".equals(md.getKey()))
-//             .map(MetaData::getValue)
-//             .filter(Objects::nonNull)
-//             .map(Object::toString)
-//             .anyMatch(v ->
-//                     v.contains("track_trace") ||
-//                     v.contains("barcode")
-//             );
-// }
+        for (DateTimeFormatter formatter : DELIVERY_DATE_FORMATS) {
+            try {
+                return Optional.of(LocalDate.parse(value, formatter));
+            } catch (DateTimeParseException ignored) {
+                // Probeer het volgende bekende formaat.
+            }
+        }
+        return Optional.empty();
+    }
 
 }

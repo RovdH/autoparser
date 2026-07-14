@@ -69,6 +69,9 @@ public class OrderDto {
         @JsonProperty("product_id")
         private Long productId;
 
+        @JsonProperty("meta_data")
+        private List<MetaData> metaData;
+
         public String getName() {
             return name;
         }
@@ -83,6 +86,14 @@ public class OrderDto {
 
         public void setProductId(Long productId) {
             this.productId = productId;
+        }
+
+        public List<MetaData> getMetaData() {
+            return metaData;
+        }
+
+        public void setMetaData(List<MetaData> metaData) {
+            this.metaData = metaData;
         }
     }
 

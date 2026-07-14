@@ -1,0 +1,31 @@
+WIJNKADO ORDERUITDRAAI VOOR WINDOWS
+==================================
+
+Starten
+-------
+1. Pak de volledige ZIP-map uit.
+2. Dubbelklik op START-WIJNKADO.bat.
+3. Wacht tot de browser vanzelf opent.
+4. Laat het zwarte Wijnkado-venster open zolang je de pagina gebruikt.
+
+Bij de allereerste start wordt automatisch een portable Java-runtime van
+Eclipse Temurin gedownload. Hiervoor is een internetverbinding nodig en dit
+kan enkele minuten duren. Er wordt niets in Windows geinstalleerd.
+
+Stoppen
+-------
+Sluit het zwarte Wijnkado-venster wanneer je helemaal klaar bent.
+
+Belangrijk
+----------
+- Start de BAT niet rechtstreeks vanuit de ZIP; pak de map eerst uit.
+- De applicatie is alleen op deze laptop bereikbaar via http://localhost:8080/.
+- Voor de knop "Markeer als voltooid" moet de WooCommerce API-key
+  de rechten "Lezen/schrijven" hebben.
+- Dit pakket bevat de private WooCommerce-koppeling. Deel de map daarom
+  alleen met iemand die toegang tot het Wijnkado-beheer mag hebben.
+
+Problemen
+---------
+Als de browser niet opent of een fout toont, maak dan een foto van de tekst
+in het zwarte Wijnkado-venster.

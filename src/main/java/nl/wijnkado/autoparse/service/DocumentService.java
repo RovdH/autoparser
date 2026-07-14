@@ -37,15 +37,16 @@ public class DocumentService {
         this.productService = productService;
     }
 
-    public Path generateOrdersDocument() throws IOException {
+    public Path generateOrdersDocument(LocalDate from, LocalDate to) throws IOException {
         // 1) Haal orders op en sorteer: oudste ID eerst
-        List<OrderDto> orders = orderService.getProcessingOrdersWithoutTrackTrace()
+        List<OrderDto> orders = orderService.getProcessingOrdersByDeliveryDate(from, to)
                 .stream()
                 .sorted(Comparator.comparingLong(OrderDto::getId))
                 .toList();
 
         if (orders.isEmpty()) {
-            throw new IllegalStateException("Geen orders zonder track & trace gevonden.");
+            throw new IllegalStateException("Geen processing orders gevonden voor bezorgdatum "
+                    + formatDateRange(from, to) + ".");
         }
 
         XWPFDocument document = new XWPFDocument();
@@ -53,102 +54,90 @@ public class DocumentService {
         for (int i = 0; i < orders.size(); i++) {
             OrderDto order = orders.get(i);
 
-            // --- 1) Witregel boven customer note ---
-            addEmptyParagraph(document, ParagraphAlignment.CENTER);
+            // Alle producten in de order afdrukken.
+            List<LineItem> items = order.getLineItems() != null ? order.getLineItems() : List.of();
 
-            // --- 2) Customer note gecentreerd + HTML entities unescapen + echte enters ---
-            String rawNote = order.getCustomerNote() != null ? order.getCustomerNote() : "";
+            for (int pi = 0; pi < items.size(); pi++) {
+                LineItem item = items.get(pi);
 
-            // &amp; -> &, &eacute; -> é, etc.
-            String note = StringEscapeUtils.unescapeHtml4(rawNote);
-            // non-breaking spaces naar normale spaties
-            note = note.replace('\u00A0', ' ').trim();
+                // Vanaf het 2e product: nieuwe pagina binnen dezelfde order
+                if (pi > 0) {
+                    XWPFParagraph pageBreak = document.createParagraph();
+                    pageBreak.setPageBreak(true);
 
-            XWPFParagraph noteParagraph = document.createParagraph();
-            noteParagraph.setAlignment(ParagraphAlignment.CENTER);
-            XWPFRun noteRun = noteParagraph.createRun();
-            noteRun.setBold(true);
-
-            // elke regel apart met echte Word-‘enters’
-            String[] noteLines = note.split("\\r?\\n");
-            for (int li = 0; li < noteLines.length; li++) {
-                if (li > 0) {
-                    noteRun.addBreak();
-                }
-                noteRun.setText(noteLines[li]);
-            }
-
-            // --- 3) Witregel onder customer note ---
-            addEmptyParagraph(document, ParagraphAlignment.CENTER);
-
-            // --- 4) Scheidingslijn tussen customer note en wijnblok ---
-            addSeparatorLine(document);
-
-            // --- 5) Extra witregel onder de lijn ---
-            addEmptyParagraph(document, ParagraphAlignment.CENTER);
-
-            // --- 6) Product title (line_items[0].name) ---
-            String productTitle = "";
-            Long productId = null;
-
-            if (order.getLineItems() != null && !order.getLineItems().isEmpty()) {
-                LineItem item = order.getLineItems().get(0);
-
-                if (item.getName() != null) {
-                    // HTML entities (&amp;, &nbsp;, &eacute;) netjes omzetten
-                    productTitle = StringEscapeUtils.unescapeHtml4(item.getName())
-                            .replace('\u00A0', ' ')  // NBSP → normale spatie
-                            .trim();
                 }
 
-                productId = item.getProductId();
-            }
+                addPersonalMessageBlock(document, getPersonalMessage(item,
+                        pi == 0 ? order.getCustomerNote() : null));
 
-            XWPFParagraph titleParagraph = document.createParagraph();
-            titleParagraph.setAlignment(ParagraphAlignment.CENTER);
-            XWPFRun titleRun = titleParagraph.createRun();
-            titleRun.setBold(true);
-            titleRun.setText(productTitle);
+                // --- Product title ---
+                String productTitle = "";
+                Long productId = null;
 
-            // --- 7) Productbeschrijving via Woo API ---
-            String productDescription = "";
-            if (productId != null) {
-                ProductDto product = productService.getProductById(productId);
-                if (product != null) {
-                    productDescription = cleanHtml(product.getBestDescription());
+                if (item != null) {
+                    if (item.getName() != null) {
+                        productTitle = StringEscapeUtils.unescapeHtml4(item.getName())
+                                .replace('\u00A0', ' ')
+                                .trim();
+                    }
+                    productId = item.getProductId();
                 }
+
+                XWPFParagraph titleParagraph = document.createParagraph();
+                titleParagraph.setAlignment(ParagraphAlignment.CENTER);
+                XWPFRun titleRun = titleParagraph.createRun();
+                titleRun.setBold(true);
+                titleRun.setText(productTitle);
+
+                // --- Productbeschrijving via Woo API ---
+                String productDescription = "";
+                if (productId != null) {
+                    ProductDto product = productService.getProductById(productId);
+                    if (product != null) {
+                        productDescription = cleanHtml(product.getBestDescription());
+                    }
+                }
+
+                if (productDescription != null && !productDescription.isBlank()) {
+                    XWPFParagraph descParagraph = document.createParagraph();
+                    descParagraph.setAlignment(ParagraphAlignment.CENTER);
+                    XWPFRun descRun = descParagraph.createRun();
+                    descRun.setFontSize(11);
+
+                    // Respecteer ook nieuwe regels in de description
+                    String[] descLines = productDescription.split("\\r?\\n");
+                    for (int di = 0; di < descLines.length; di++) {
+                        if (di > 0) {
+                            descRun.addBreak();
+                        }
+                        descRun.setText(descLines[di]);
+                    }
+                }
+
+                // --- Witregel onder de beschrijving ---
+                addEmptyParagraph(document, ParagraphAlignment.CENTER);
+
+                // --- Ordernummer in klein, lichtgrijs font onderaan dit productblok ---
+                XWPFParagraph orderInfoParagraph = document.createParagraph();
+                orderInfoParagraph.setAlignment(ParagraphAlignment.CENTER);
+                XWPFRun orderRun = orderInfoParagraph.createRun();
+                orderRun.setText("Order: " + order.getId());
+                orderRun.setFontSize(8);
+                orderRun.setColor("888888");
             }
 
-            if (productDescription != null && !productDescription.isBlank()) {
-                XWPFParagraph descParagraph = document.createParagraph();
-                descParagraph.setAlignment(ParagraphAlignment.CENTER);
-                XWPFRun descRun = descParagraph.createRun();
-                descRun.setText(productDescription);
-                descRun.setFontSize(11);
-            }
-
-            // --- 8) Witregel onder de beschrijving ---
-            addEmptyParagraph(document, ParagraphAlignment.CENTER);
-
-            // --- 9) Ordernummer in klein, lichtgrijs font onderaan dit blok ---
-            XWPFParagraph orderInfoParagraph = document.createParagraph();
-            orderInfoParagraph.setAlignment(ParagraphAlignment.CENTER);
-            XWPFRun orderRun = orderInfoParagraph.createRun();
-            orderRun.setText("Order: " + order.getId());
-            orderRun.setFontSize(8);        // klein font
-            orderRun.setColor("888888");    // lichtgrijs (hex)
-
-            // Pagina-einde na elke order, behalve de laatste
+            // Pagina-einde na elke order, behalve de laatste order
             if (i < orders.size() - 1) {
                 XWPFParagraph pageBreak = document.createParagraph();
                 pageBreak.setPageBreak(true);
             }
         }
 
-        // Output pad, bv. ./output/orders_2025-12-09.docx
+        // Output pad
         Path outputDir = Paths.get("output");
         Files.createDirectories(outputDir);
-        Path outputFile = outputDir.resolve("orders_" + LocalDate.now() + ".docx");
+        String datePart = from.equals(to) ? from.toString() : from + "_tot_" + to;
+        Path outputFile = outputDir.resolve("orders_bezorgdatum_" + datePart + ".docx");
 
         try (OutputStream os = Files.newOutputStream(outputFile)) {
             document.write(os);
@@ -156,6 +145,50 @@ public class DocumentService {
         document.close();
 
         return outputFile;
+    }
+
+    private String getPersonalMessage(LineItem item, String legacyCustomerNote) {
+        if (item == null || item.getMetaData() == null) {
+            return legacyCustomerNote != null ? legacyCustomerNote : "";
+        }
+
+        return item.getMetaData().stream()
+                .filter(meta -> meta.getKey() != null
+                        && "Persoonlijke boodschap".equalsIgnoreCase(meta.getKey().trim()))
+                .map(OrderDto.MetaData::getValue)
+                .filter(value -> value != null && !value.toString().isBlank())
+                .map(Object::toString)
+                .findFirst()
+                .orElse(legacyCustomerNote != null ? legacyCustomerNote : "");
+    }
+
+    private void addPersonalMessageBlock(XWPFDocument document, String rawMessage) {
+        addEmptyParagraph(document, ParagraphAlignment.CENTER);
+
+        String message = StringEscapeUtils.unescapeHtml4(rawMessage != null ? rawMessage : "")
+                .replace('\u00A0', ' ')
+                .trim();
+
+        XWPFParagraph messageParagraph = document.createParagraph();
+        messageParagraph.setAlignment(ParagraphAlignment.CENTER);
+        XWPFRun messageRun = messageParagraph.createRun();
+        messageRun.setBold(true);
+
+        String[] lines = message.split("\\r?\\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) {
+                messageRun.addBreak();
+            }
+            messageRun.setText(lines[i]);
+        }
+
+        addEmptyParagraph(document, ParagraphAlignment.CENTER);
+        addSeparatorLine(document);
+        addEmptyParagraph(document, ParagraphAlignment.CENTER);
+    }
+
+    private String formatDateRange(LocalDate from, LocalDate to) {
+        return from.equals(to) ? from.toString() : from + " t/m " + to;
     }
 
     private void addEmptyParagraph(XWPFDocument doc, ParagraphAlignment alignment) {
@@ -194,7 +227,8 @@ public class DocumentService {
         // 1) HTML line breaks → \n
         String text = html
                 .replaceAll("(?i)<br\\s*/?>", "\n")
-                .replaceAll("(?i)</p>", "\n");
+                .replaceAll("(?i)</p>", "\n")
+                .replaceAll("(?i)<p\\b[^>]*>", ""); // open <p> weg zodat je geen rare concatenatie krijgt
 
         // 2) overige tags weg
         text = text.replaceAll("<[^>]+>", "");

@@ -6,6 +6,15 @@ target/
 application.yml
 src/main/resources/application.yml
 
+# Gegenereerde Word-uitdraaien
+output/
+
+# Gegenereerd Windows-distributiepakket
+Wijnkado-Windows.zip
+windows-pakket/WijnkadoAutoparse.jar
+windows-pakket/runtime/
+windows-pakket/runtime-download/
+
 ### STS ###
 .apt_generated
 .classpath
